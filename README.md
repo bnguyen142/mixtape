@@ -26,7 +26,9 @@ ai201-project5-mixtape-starter/
 ├── tests/
 │   ├── test_streaks.py
 │   ├── test_search.py
-│   └── test_playlists.py
+│   ├── test_playlists.py
+│   ├── test_feed.py
+│   └── test_notifications.py
 ├── seed_data.py                # Populates DB with test data
 ├── requirements.txt
 └── .gitignore
