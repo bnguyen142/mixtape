@@ -83,8 +83,9 @@ While investigating Issue #4 (notification on rating), I initially thought the e
   `playlist_entries.position`), `get_user_playlists()`.
 - **seed_data.py** — populates the DB with users, friendships, songs, tags,
   listening events, ratings, and playlists for local testing.
-- **tests/** — `test_streaks.py`, `test_search.py`, `test_playlists.py`
-  (pytest, run with `pytest tests/`).
+- **tests/** — `test_streaks.py`, `test_search.py`, `test_playlists.py`,
+  `test_feed.py` (added while investigating Issue #2 — no test previously
+  covered `feed_service.py`) (pytest, run with `pytest tests/`).
 
 ### Data flow — a user rates a song
 
@@ -208,11 +209,71 @@ don't merge them into one bullet):
 
 ### Issue #2: Friends Listening Now shows people from yesterday
 
-- **Reproduction steps:** TODO
-- **Navigation strategy:** TODO
-- **Root cause:** TODO
-- **Fix description:** TODO
-- **Side-effect check:** TODO
+- **Reproduction steps:** No existing test covered this, so I wrote
+  `tests/test_feed.py` from scratch. I first tried to reproduce this as a
+  filtering bug — single friend with two events, a friend at the exact 23h/
+  25h boundary, two separate friends (one recent, one stale), the full
+  `seed_data.py` dataset (5 users, events spanning 2–58 hours old), the same
+  scenario through a live `curl` call against the running Flask server, and
+  finally an event placed at the *exact* 24-hour cutoff instant. All six
+  produced correct filtering — nothing older than 24 hours ever leaked into
+  the result. That ruled out the threshold comparison itself. The actual
+  reproducible test ended up being about the *shape* of the returned data,
+  not filtering: `test_listened_at_is_unambiguously_utc` creates one friend
+  with a recent `ListeningEvent`, calls `get_friends_listening_now()`, and
+  asserts the returned `listened_at` string contains a UTC marker (`Z` or
+  `+00:00`). It fails with the string `'2026-07-03T22:53:41.359842'` — no
+  marker at all.
+- **Navigation strategy:** Spent significant time testing
+  `feed_service.py`'s `RECENT_THRESHOLD`/`cutoff` filter under many time
+  scenarios (see above) before concluding the filter itself was correct. I
+  also inspected the compiled SQL (`query.statement.compile(compile_kwargs=
+  {"literal_binds": True})`) and confirmed the DB stores `listened_at` as
+  plain naive text with no timezone suffix, while `cutoff`'s literal
+  includes `+00:00` — a real discrepancy, but I proved via a direct
+  exact-boundary test that it only causes borderline-recent events to be
+  *excluded*, never causes stale events to be *included*, so it doesn't
+  match the reported symptom. I also ruled out a "friend's timezone" theory
+  by confirming the `User` model has no timezone/location field anywhere —
+  every timestamp in the app is server-generated UTC, so a friend's real
+  timezone can't be a factor. That redirected me to the last place a
+  timestamp is touched: line 59's `event.listened_at.isoformat()` inside the
+  dedup loop. Since I'd already proven (during Issue #1) that SQLite/
+  SQLAlchemy round-trips a stored UTC datetime as *naive* (no `tzinfo`),
+  I recognized `.isoformat()` on that naive value would produce a marker-
+  less string — confirmed by checking the actual curl JSON response I'd
+  gotten earlier, which showed `listened_at` values with no `Z` or offset.
+- **Root cause:** `event.listened_at`, once loaded back from SQLite via
+  SQLAlchemy, is a naive `datetime` (no `tzinfo`), even though it was
+  written as UTC-aware. Calling `.isoformat()` on a naive datetime produces
+  a string with no timezone indicator at all (e.g.
+  `"2026-07-03T22:53:41.359842"`). The server's own filtering logic is
+  correct because it operates on Python `datetime` objects internally, but
+  the JSON response handed to any client is ambiguous — most datetime
+  parsers default to interpreting a marker-less ISO string as local time,
+  not UTC. A client several hours off from UTC would compute the wrong
+  elapsed time (or even the wrong calendar day) for a friend's listening
+  event, which is what produces the "shows people from yesterday" symptom —
+  it's a display/interpretation bug on the consumer side caused by an
+  ambiguous server response, not an incorrect filter.
+- **Fix description:** In the dedup loop of `get_friends_listening_now()`,
+  before calling `.isoformat()`, I added the same defensive check I'd
+  already found in `streak_service.py::update_listening_streak()`: if
+  `event.listened_at.tzinfo is None`, reattach it via
+  `.replace(tzinfo=timezone.utc)` before formatting. This guarantees the
+  serialized string always carries an explicit `+00:00` offset, so any
+  client parsing it knows unambiguously it represents UTC.
+- **Side-effect check:** Ran the full test suite
+  (`python -m pytest -v`, 14 tests total). `test_feed.py`'s new test now
+  passes, and all of `test_streaks.py` (5/5) and `test_search.py` (5/5)
+  still pass — this change only touches the result-serialization step in
+  `feed_service.py`, so I specifically checked that nothing else consumes
+  `get_friends_listening_now()`'s output in a way that expects the old
+  (unmarked) string format; `routes/feed.py` just passes the dict straight
+  through to `jsonify()`, so there's no intermediate parsing of that string
+  anywhere in the app to break. The 2 remaining failures are in
+  `test_playlists.py` and are pre-existing/unrelated (Issue #5 — I never
+  touched `playlist_service.py`).
 
 ### Issue #3: The same song keeps showing up twice in search
 

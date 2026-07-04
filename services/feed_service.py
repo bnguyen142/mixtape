@@ -53,10 +53,13 @@ def get_friends_listening_now(user_id: str) -> list[dict]:
             seen_friends.add(event.user_id)
             friend = db.session.get(User, event.user_id)
             song = db.session.get(Song, event.song_id)
+            listened_at = event.listened_at
+            if listened_at.tzinfo is None:
+                listened_at = listened_at.replace(tzinfo=timezone.utc)
             result.append({
                 "friend": friend.to_dict(),
                 "song": song.to_dict(),
-                "listened_at": event.listened_at.isoformat(),
+                "listened_at": listened_at.isoformat(),
             })
 
     return result
