@@ -41,8 +41,7 @@ def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> No
         song_id: The ID of the song being added.
         added_by_user_id: The ID of the user who added the song.
     """
-    from models import Playlist
-    from services.playlist_service import get_playlist_songs
+    from models import Playlist, playlist_entries
 
     song = db.session.get(Song, song_id)
     if not song:
@@ -56,13 +55,30 @@ def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> No
     if not playlist:
         raise ValueError(f"Playlist {playlist_id} not found")
 
-    # Add the song to the playlist
-    if song not in playlist.songs:
-        playlist.songs.append(song)
+    # Add the song to the playlist. This has to be a raw insert against the
+    # association table rather than playlist.songs.append(song): the plain
+    # ORM relationship has no way to populate playlist_entries' non-FK
+    # columns (position, added_by), both of which are NOT NULL with no
+    # default, so append() alone raises an IntegrityError.
+    was_new_addition = song not in playlist.songs
+    if was_new_addition:
+        max_position = db.session.query(
+            db.func.max(playlist_entries.c.position)
+        ).filter(playlist_entries.c.playlist_id == playlist_id).scalar()
+        db.session.execute(
+            playlist_entries.insert().values(
+                playlist_id=playlist_id,
+                song_id=song_id,
+                position=(max_position or 0) + 1,
+                added_by=added_by_user_id,
+            )
+        )
         db.session.commit()
 
-    # Notify the person who originally shared the song (if it wasn't them who added it)
-    if song.shared_by != added_by_user_id:
+    # Notify the person who originally shared the song, but only when this
+    # call actually added the song (not a repeat call for a song already in
+    # the playlist) and it wasn't them who added it
+    if was_new_addition and song.shared_by != added_by_user_id:
         create_notification(
             user_id=song.shared_by,
             notification_type="song_added_to_playlist",
@@ -99,16 +115,20 @@ def rate_song(user_id: str, song_id: str, score: int) -> Rating:
     ).first()
 
     if existing:
+        score_changed = existing.score != score
         existing.score = score
         rating = existing
     else:
+        score_changed = True
         rating = Rating(user_id=user_id, song_id=song_id, score=score)
         db.session.add(rating)
 
     db.session.commit()
 
-    # Notify the person who originally shared the song (if it wasn't them who rated it)
-    if song.shared_by != user_id:
+    # Notify the person who originally shared the song, but only when the
+    # rating actually changed (not a repeat submission of the same score)
+    # and it wasn't them who rated it
+    if score_changed and song.shared_by != user_id:
         create_notification(
             user_id=song.shared_by,
             notification_type="song_rated",

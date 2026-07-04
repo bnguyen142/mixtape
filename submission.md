@@ -456,6 +456,49 @@ original code before applying the identical fix — attaching
 `get_activity_feed()`. Ran the full suite afterward
 (`python -m pytest -v`, 18 tests): all pass.
 
+While reviewing Issue #4's `rate_song()`/`add_to_playlist()` for a related
+consistency issue, I noticed both functions send a notification on every
+call, even when the call is a genuine no-op (re-submitting the same
+rating score, or re-adding a song already in the playlist). Testing the
+playlist case surfaced a second, more serious pre-existing bug in the
+process: `add_to_playlist()` uses `playlist.songs.append(song)`, but
+`Playlist.songs` (`models.py:149`) is a plain `db.relationship(...,
+secondary=playlist_entries)` with no way to populate `playlist_entries`'s
+`position` and `added_by` columns, both `NOT NULL` with no default. Every
+real call to `add_to_playlist()` for a song not already in the playlist
+raised `sqlalchemy.exc.IntegrityError: NOT NULL constraint failed:
+playlist_entries.position` — meaning `POST /playlists/<id>/songs` was
+completely broken for its primary use case. This went undetected because
+`seed_data.py` and the existing `test_playlists.py` fixtures populate
+`playlist_entries` via a raw `.insert().values(...)` that bypasses the
+relationship entirely, so no test had ever exercised the real code path.
+
+Fixes, in `services/notification_service.py`:
+
+- `add_to_playlist()`: replaced `playlist.songs.append(song)` with a raw
+  `playlist_entries.insert()` that computes the next `position`
+  (`max(existing positions) + 1`, defaulting to 1 for an empty playlist)
+  and sets `added_by=added_by_user_id` explicitly.
+- `add_to_playlist()` and `rate_song()`: the notification block for each
+  is now gated on whether the call actually changed something
+  (`was_new_addition` / `score_changed`), not just on who performed the
+  action, so a repeat call with no state change no longer sends a
+  duplicate notification.
+
+Added to `tests/test_notifications.py`: `test_no_duplicate_notification_when_song_already_in_playlist`
+(adding the same song twice sends exactly one notification, and no longer
+crashes), `test_no_duplicate_notification_when_resubmitting_same_score`
+(re-submitting an identical score sends no second notification), and
+`test_notification_when_rating_is_changed` (changing the score to a
+different value still notifies). Verified all three fail against the
+pre-fix code (two with a wrong notification count, one with the
+`IntegrityError` above) before confirming they pass with the fix. Ran the
+full suite afterward (`python -m pytest -v`, 21 tests): all pass,
+including the pre-existing `test_playlist_returns_all_songs` /
+`test_playlist_returns_songs_in_order` (which seed `playlist_entries` via
+raw insert and don't touch `add_to_playlist()`, confirming this change
+didn't affect playlist retrieval or ordering).
+
 ---
 
 ## Regression Test (stretch)

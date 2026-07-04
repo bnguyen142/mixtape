@@ -7,7 +7,8 @@ Tests for notification creation on song rating.
 import pytest
 from app import create_app, db
 from models import User, Song
-from services.notification_service import rate_song, get_notifications
+from services.notification_service import rate_song, get_notifications, add_to_playlist
+from services.playlist_service import create_playlist
 
 
 @pytest.fixture
@@ -57,3 +58,46 @@ def test_no_self_notification_when_rating_own_song(app, sharer_and_rater):
 
         notifications = get_notifications(sharer.id)
         assert notifications == []
+
+
+def test_no_duplicate_notification_when_resubmitting_same_score(app, sharer_and_rater):
+    """
+    Rating a song, then submitting the exact same score again, is a no-op —
+    it should not generate a second notification.
+    """
+    with app.app_context():
+        sharer, rater, song = sharer_and_rater
+
+        rate_song(rater.id, song.id, 5)
+        rate_song(rater.id, song.id, 5)
+
+        notifications = get_notifications(sharer.id)
+        assert len(notifications) == 1
+
+
+def test_notification_when_rating_is_changed(app, sharer_and_rater):
+    """Changing an existing rating to a different score should notify again."""
+    with app.app_context():
+        sharer, rater, song = sharer_and_rater
+
+        rate_song(rater.id, song.id, 5)
+        rate_song(rater.id, song.id, 2)
+
+        notifications = get_notifications(sharer.id)
+        assert len(notifications) == 2
+
+
+def test_no_duplicate_notification_when_song_already_in_playlist(app, sharer_and_rater):
+    """
+    Adding a song to a playlist, then calling add_to_playlist again for the
+    same song, is a no-op — it should not generate a second notification.
+    """
+    with app.app_context():
+        sharer, rater, song = sharer_and_rater
+        playlist = create_playlist("Test Playlist", rater.id)
+
+        add_to_playlist(playlist.id, song.id, rater.id)
+        add_to_playlist(playlist.id, song.id, rater.id)
+
+        notifications = get_notifications(sharer.id)
+        assert len(notifications) == 1
