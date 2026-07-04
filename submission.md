@@ -277,11 +277,73 @@ don't merge them into one bullet):
 
 ### Issue #3: The same song keeps showing up twice in search
 
-- **Reproduction steps:** TODO
-- **Navigation strategy:** TODO
-- **Root cause:** TODO
-- **Fix description:** TODO
-- **Side-effect check:** TODO
+- **Reproduction steps:** `test_search.py` already had a case for this
+  (`test_search_no_duplicates_multi_tag_song`, with a comment reading
+  `# Should be 1, bug causes it to be 3`), but running the existing suite
+  showed all 5 tests passing — the multi-tag song did **not** duplicate. I
+  reproduced the exact scenario manually (a song with 3 tags, searched by
+  title) across four different setups — fresh in-memory DB, the real
+  persisted `seed_data.py` database, a direct `search_songs()` call, and a
+  live `curl` request through the actual Flask route — and got `count: 1`
+  every time. So the bug as originally described wasn't observable through
+  normal use in this environment. It only became reproducible once I
+  inspected the **raw SQL** underneath `search_songs()` directly: a plain
+  `SELECT ... FROM song LEFT OUTER JOIN song_tags ...` for the same 3-tag
+  song returns 3 rows at the database level, confirming the join really
+  does fan out the way the bug report implies — it just wasn't surfacing as
+  visibly duplicated `Song` objects.
+- **Navigation strategy:** Since none of the black-box tests (in-memory,
+  seeded, live HTTP) reproduced the symptom, and there's no other function
+  anywhere in the codebase that joins against `song_tags` (confirmed via
+  `grep -rn "song_tags" --include="*.py" .` — only `search_service.py`,
+  `seed_data.py`, and `models.py` reference it), I dropped down a layer and
+  compared the *raw SQL* row count against the *ORM result* row count for
+  the identical join. The raw SQL genuinely produced 3 rows; the ORM-mapped
+  `Song` result was 1. That gap told me the join itself was exactly as
+  buggy as described, but something in between the SQL and the Python
+  objects was silently collapsing the duplicates. I also ruled out a
+  version-mismatch explanation by checking the installed SQLAlchemy version
+  (2.0.51) against the `requirements.txt` pin (`sqlalchemy>=2.0.0`) — it
+  satisfies the pin, so this isn't a case of an unexpected library version
+  being installed.
+- **Root cause:** `search_songs()` does
+  `db.session.query(Song).outerjoin(song_tags, ...).filter(...).all()` with
+  no `.distinct()` anywhere. The `outerjoin` against `song_tags` produces
+  one row per matching tag (a song with 3 tags yields 3 joined rows), which
+  is exactly what the bug report describes. In this environment, that
+  duplication doesn't reach the caller because SQLAlchemy's legacy
+  `Query.all()` automatically deduplicates full-entity results by primary
+  key when the query selects only the mapped entity (`Song`) and nothing
+  else — an incidental ORM behavior, not anything explicit in this code.
+  The underlying query was never actually safe against duplication; it was
+  only ever protected by an ORM behavior it doesn't ask for, meaning the
+  bug is real and "conditional" on however the query happens to be
+  executed (legacy ORM `Query` vs. e.g. 2.0-style `select()`, or a future
+  SQLAlchemy version that changes this behavior) rather than being visible
+  under every possible way of running this code.
+- **Fix description:** Added `.distinct()` to the query chain in
+  `search_songs()`, so it reads
+  `.outerjoin(...).filter(...).distinct().all()`. I confirmed via
+  `query.statement.compile(compile_kwargs={"literal_binds": True})` that
+  this actually changes the generated SQL to `SELECT DISTINCT ...`,
+  enforcing deduplication explicitly at the database level rather than
+  leaving it to incidental ORM behavior. This makes the function correct
+  regardless of which SQLAlchemy execution style or version is used to run
+  it, addressing the actual mechanism (unprotected join fan-out) rather
+  than just leaving the current accidental protection in place.
+- **Side-effect check:** Since the existing tests passed both before and
+  after this fix (they never actually caught the underlying flaw), I wrote
+  a new test, `test_search_query_is_explicitly_distinct`, that uses a
+  SQLAlchemy `before_cursor_execute` event listener to capture the actual
+  SQL `search_songs()` executes and asserts `"DISTINCT"` appears in it. I
+  verified this test is meaningful by temporarily reverting the
+  `.distinct()` change and re-running it — it failed as expected
+  (`search_songs()'s query has no explicit DISTINCT`) — then restored the
+  fix and confirmed it passes again. Ran the full suite afterward
+  (`python -m pytest -v`, 15 tests): all pass, confirming the explicit
+  `.distinct()` didn't change any other search behavior (single-tag songs,
+  no-tag songs, no-match queries all still return the same correct
+  results).
 
 ### Issue #4: I got notified when a friend added my song to a playlist but not when they rated it
 
@@ -293,11 +355,49 @@ don't merge them into one bullet):
 
 ### Issue #5: The last song in a playlist never shows up
 
-- **Reproduction steps:** TODO
-- **Navigation strategy:** TODO
-- **Root cause:** TODO
-- **Fix description:** TODO
-- **Side-effect check:** TODO
+- **Reproduction steps:** Ran `python -m pytest tests/test_playlists.py -v`.
+  2 of 3 tests fail: `test_playlist_returns_all_songs` fails with
+  `assert 4 == 5` (a 5-song playlist only returns 4), and
+  `test_playlist_returns_songs_in_order` fails because the result is missing
+  `"Track 5"` specifically — not a random song, always the last one in
+  position order.
+- **Navigation strategy:** Both failing tests already existed with comments
+  spelling out the expected vs. actual behavior
+  (`# Bug causes this to return 4`), so I went straight to
+  `services/playlist_service.py::get_playlist_songs()`. The query itself —
+  join, filter by `playlist_id`, `order_by(asc(playlist_entries.c.position))`
+  — builds the correctly-ordered list of all songs. The very last line, the
+  `return` statement, was the only place left where something could be
+  removing an item after the query already had the full, correctly-ordered
+  set.
+- **Root cause:** The return statement was
+  `return [song.to_dict() for song in songs[:-1]]`. `songs[:-1]` is a Python
+  slice meaning "every element except the last one." The query and ordering
+  logic are both correct and produce a full, properly-ordered list — this
+  slice discards the final element from that list right before returning it,
+  regardless of the playlist's length or the songs' actual `position`
+  values. That's why the symptom is specifically "the last song never shows
+  up" rather than a random or duplicated song: it's a fixed off-by-one
+  truncation applied after correct data has already been assembled, not a
+  query or ordering bug. I don't have a definitive answer for why `[:-1]`
+  was there in the first place — my best guess is a leftover from unrelated
+  logic (e.g. code that once needed to exclude a sentinel/placeholder row)
+  that never got cleaned up, since nothing else in the function or its
+  docstring suggests dropping the last song was intentional.
+- **Fix description:** Changed `songs[:-1]` to plain `songs`, removing the
+  slice entirely: `return [song.to_dict() for song in songs]`. This returns
+  every song the query already correctly fetched and ordered, with nothing
+  discarded.
+- **Side-effect check:** Ran the full test suite
+  (`python -m pytest -v`, 14 tests). All 14 pass, including
+  `test_empty_playlist_returns_empty_list` — I specifically checked this one
+  because it's the edge case most likely to break from a slicing change: an
+  empty list's `[:-1]` is still `[]` (no error), so this test was already
+  passing before my fix, and confirming it still passes after removing the
+  slice shows the fix didn't introduce an index error or change behavior for
+  the zero-songs case. This fix also happened to resolve both
+  `test_playlists.py` failures noted (but not investigated) during Issue
+  #2's side-effect check.
 
 ---
 
