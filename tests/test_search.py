@@ -5,6 +5,7 @@ Tests for song search logic.
 """
 
 import pytest
+from sqlalchemy import event
 from app import create_app, db
 from models import User, Song, Tag, song_tags
 from services.search_service import search_songs
@@ -102,6 +103,35 @@ def test_search_no_duplicates_multi_tag_song(app, seed_songs):
         results = search_songs("Crown Heights")
         matching = [r for r in results if r["title"] == "Crown Heights Anthem"]
         assert len(matching) == 1  # Should be 1, bug causes it to be 3
+
+
+def test_search_query_is_explicitly_distinct(app, seed_songs):
+    """
+    search_songs() must explicitly deduplicate at the SQL level (DISTINCT),
+    rather than relying on the ORM's incidental entity-uniquing behavior.
+    The outerjoin against song_tags fans out into one row per tag, so
+    without an explicit DISTINCT the underlying query is unsafe even if a
+    particular SQLAlchemy version happens to hide the duplication.
+    """
+    with app.app_context():
+        captured_statements = []
+
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            captured_statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            search_songs("Crown Heights")
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        select_statements = [s for s in captured_statements if s.strip().upper().startswith("SELECT")]
+        assert select_statements, "expected search_songs() to execute at least one SELECT"
+        assert any("DISTINCT" in s.upper() for s in select_statements), (
+            "search_songs()'s query has no explicit DISTINCT — it's relying on "
+            "incidental ORM deduplication instead of guaranteeing correctness "
+            "at the query level"
+        )
 
 
 def test_search_no_duplicates_no_tag_song(app, seed_songs):
