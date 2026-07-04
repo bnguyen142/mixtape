@@ -470,7 +470,60 @@ don't merge them into one bullet):
 
 <!-- If you write one, name the test file/function and which bug it covers. -->
 
-TODO (optional)
+Two of the five bugs already had failing tests written before I touched
+any code (`tests/test_streaks.py::test_streak_increments_on_sunday` for
+Issue #1, and `tests/test_playlists.py::test_playlist_returns_all_songs` /
+`test_playlist_returns_songs_in_order` for Issue #5). For those, the
+existing tests going from FAILED to PASSED *is* the regression test — no
+new file was needed, since the assertions already pin down the exact
+buggy behavior.
+
+For the three bugs with no prior coverage, I wrote new tests, each
+developed by first proving it fails against the buggy code, then
+confirming it passes after the fix (not just written after the fact to
+match whatever the fix happened to produce):
+
+- **`tests/test_feed.py::test_listened_at_is_unambiguously_utc`** (Issue
+  #2) — creates a friend with one recent `ListeningEvent`, calls
+  `get_friends_listening_now()`, and asserts the returned `listened_at`
+  string contains an explicit UTC marker (`Z` or `+00:00`). Before the fix
+  this failed with a bare string like `'2026-07-03T22:53:41.359842'`; after
+  attaching `tzinfo=timezone.utc` before serialization, it passes. If
+  someone reintroduces a naive `.isoformat()` call here, this test catches
+  it immediately instead of relying on a client silently misinterpreting
+  the timestamp.
+- **`tests/test_search.py::test_search_query_is_explicitly_distinct`**
+  (Issue #3) — uses a SQLAlchemy `before_cursor_execute` event listener to
+  capture the actual SQL `search_songs()` executes, and asserts
+  `"DISTINCT"` appears in it. I specifically verified this test's value by
+  temporarily removing `.distinct()` from the query and re-running it — it
+  failed as expected — then restored the fix and confirmed it passed
+  again. This is a stronger regression guard than the pre-existing
+  duplicate-count tests in the same file, because those already passed
+  before my fix too (the ORM's incidental deduplication was masking the
+  bug) — this test checks the query's actual safety property directly, so
+  it can't be silently defeated by a future SQLAlchemy version or query
+  rewrite the way the count-based tests already were.
+- **`tests/test_notifications.py`** (Issue #4, new file — no prior test
+  covered notifications at all) — two tests:
+  `test_sharer_is_notified_when_song_is_rated` confirms the song's sharer
+  receives exactly one `"song_rated"` notification containing the rater's
+  username and the song's title when someone else rates their song, and
+  `test_no_self_notification_when_rating_own_song` confirms rating your own
+  song produces zero notifications, guarding the self-notification check
+  specifically since that's the condition most likely to get silently
+  dropped if this code is ever refactored.
+
+All three new tests follow the same fixture pattern already established in
+`tests/test_streaks.py` (an isolated in-memory SQLite `app` fixture, plus a
+data-seeding fixture scoped to that one test file) so they run fully
+isolated from each other and from the real `mixtape.db`, and so anyone
+extending this suite later has a consistent pattern to follow. Running
+`python -m pytest -v` from the project root now executes all 17 tests
+across all five test files in one pass — that full run is what should be
+checked before merging any future change to `streak_service.py`,
+`feed_service.py`, `search_service.py`, `playlist_service.py`, or
+`notification_service.py`, so none of these five fixes silently regress.
 
 ---
 
