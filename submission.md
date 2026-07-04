@@ -2,21 +2,6 @@
 
 ## AI Usage
 
-<!--
-TODO: Fill this in as you go (or at the end, while it's fresh). Be specific:
-- What did you ask AI tools to explain, trace, or summarize?
-- What did they help you understand?
-- Where did you have to verify something yourself, or where was the AI's
-  explanation incomplete / wrong / pointing you the wrong way?
-
-Example of the level of detail expected:
-"I gave Claude the contents of streak_service.py and asked it to explain what
-update_listening_streak() does step by step. It correctly described the
-day-difference logic but I had to verify the weekday() boundary behavior
-myself by testing it in a Python shell, since the AI's first explanation of
-the ISO weekday numbering was wrong."
--->
-
 Read through the flow of code, asking AI as coach to confirm thinking is correct on certain things and asking questions like search and q functions. also ask to clarify when terms like "feed" was used to in feed_bp vs feed inside a function. after going thruogh and mapping the services to route, I ask AI to confirm my connections
 
 While investigating Issue #4 (notification on rating), I initially thought the expected behavior was that the playlist's creator should be notified when someone rates a song in that playlist. I asked the AI to check that interpretation against the code. It pointed out that the `Rating` model (`id, user_id, song_id, score, rated_at`) has no `playlist_id` field at all, and that `rate_song()` never receives a `playlist_id` — so there's no way to even determine "which playlist" a rating belongs to, since a song can be in multiple playlists at once. That confirmed my interpretation was wrong: the correct parallel is "notify the song's original sharer," the same pattern `add_to_playlist()` already uses, not "notify the playlist creator." I had to revise my understanding based on that check rather than going in with the playlist-creator assumption.
@@ -85,7 +70,9 @@ While investigating Issue #4 (notification on rating), I initially thought the e
   listening events, ratings, and playlists for local testing.
 - **tests/** — `test_streaks.py`, `test_search.py`, `test_playlists.py`,
   `test_feed.py` (added while investigating Issue #2 — no test previously
-  covered `feed_service.py`) (pytest, run with `pytest tests/`).
+  covered `feed_service.py`), `test_notifications.py` (added while fixing
+  Issue #4 — no test previously covered `notification_service.py`) (pytest,
+  run with `pytest tests/`).
 
 ### Data flow — a user rates a song
 
@@ -141,27 +128,6 @@ While investigating Issue #4 (notification on rating), I initially thought the e
 
 ## Root Cause Analysis
 
-<!--
-Fill in one entry per bug you fix (at least 3). Do this right after you fix
-each bug, not at the end. Six fields per entry, matching the grading rubric
-exactly (it grades "fix description" and "side-effect check" separately —
-don't merge them into one bullet):
-
-1. Reproduction steps    — inputs / actions / data state that trigger it.
-2. Navigation strategy   — which files you opened, what you followed (a call,
-   a query, a data flow), and the specific moment you became confident this
-   was the root cause and not just a suspicious area. Show the path, not just
-   the destination.
-3. Root cause            — name the specific function/variable/condition and
-   explain the mechanism: why THIS causes the reported behavior under THESE
-   conditions. "The code was wrong" or a restatement of the bug report earns
-   no credit here.
-4. Fix description       — what you changed and why that specific change
-   addresses the mechanism described above (not just "I fixed it").
-5. Side-effect check     — a specific, deliberate check of a specific other
-   behavior/code path that touches the same data, plus why that check was
-   sufficient. "The app still ran" does not satisfy this on its own.
--->
 ### Issue #1: My listening streak keeps resetting
 
 - **Reproduction steps:** Ran `python -m pytest tests/test_streaks.py -v`. 4 of
@@ -468,8 +434,6 @@ don't merge them into one bullet):
 
 ## Regression Test (stretch)
 
-<!-- If you write one, name the test file/function and which bug it covers. -->
-
 Two of the five bugs already had failing tests written before I touched
 any code (`tests/test_streaks.py::test_streak_increments_on_sunday` for
 Issue #1, and `tests/test_playlists.py::test_playlist_returns_all_songs` /
@@ -529,6 +493,5 @@ checked before merging any future change to `streak_service.py`,
 
 ## git log --oneline screenshot
 
-<!-- Paste/attach the screenshot here, or note where it's included in your submission. -->
+![git log --oneline output showing all 5 fix commits on bugfix/mixtape](docs/git-log-screenshot.png)
 
-TODO
