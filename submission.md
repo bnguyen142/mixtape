@@ -347,11 +347,76 @@ don't merge them into one bullet):
 
 ### Issue #4: I got notified when a friend added my song to a playlist but not when they rated it
 
-- **Reproduction steps:** TODO
-- **Navigation strategy:** TODO
-- **Root cause:** TODO
-- **Fix description:** TODO
-- **Side-effect check:** TODO
+- **Reproduction steps:** No existing test covered notifications at all. I
+  manually confirmed the missing behavior in a Python shell: created a
+  sharer and a rater, called `rate_song(rater.id, song.id, 5)`, then called
+  `get_notifications(sharer.id)` — it returned `[]`. For comparison,
+  `add_to_playlist()` in the same file does create a notification for its
+  action. So the bug is a missing feature in `rate_song()`, not broken
+  existing logic — there was nothing to fail an assertion against, since no
+  notification code path existed there at all.
+- **Navigation strategy:** This is the one issue with no "hidden bug in
+  existing logic" to trace — it required figuring out *what the correct
+  behavior should be* first, which took several passes. My first
+  hypothesis was that the *playlist's creator* should be notified when a
+  song in their playlist gets rated. I checked this against the `Rating`
+  model (`id, user_id, song_id, score, rated_at`) and found it has no
+  `playlist_id` field, and `rate_song()` never receives one either — so
+  there's no way to even determine "which playlist" a rating belongs to,
+  since a song can sit in multiple playlists at once. That ruled out the
+  playlist-creator theory entirely: a rating isn't scoped to any playlist.
+  I then worked through the bug title itself with concrete named
+  examples (a sharer, a friend who adds/rates, and — to double check I
+  wasn't just replacing one wrong guess with another — a hypothetical third
+  person who created the playlist but didn't share the song). Tracing
+  `add_to_playlist()`'s *existing, working* notification call
+  (`create_notification(user_id=song.shared_by, ...)`) showed it already
+  notifies the song's sharer, never `playlist.created_by` — confirming the
+  reporter in the bug title ("I got notified when... added **my song**")
+  is the song's sharer, and the same person should be notified for the
+  rating case, by the same logic, for consistency.
+- **Root cause:** `rate_song()` in `notification_service.py` never called
+  `create_notification()` anywhere in its body — after saving/updating the
+  `Rating` row, the function just returned. `add_to_playlist()`, in the
+  same file, already implements the correct pattern for this exact kind of
+  event (notify the song's sharer when someone interacts with their
+  shared song), but that pattern was never applied to the rating action.
+  This isn't a broken condition or an off-by-one — it's a feature that was
+  implemented for one trigger (adding to a playlist) and simply never
+  extended to the other (rating), even though `create_notification()`'s own
+  docstring already lists `'song_rated'` as an example type string,
+  suggesting it was intended.
+- **Fix description:** Added a notification call to `rate_song()`,
+  immediately after `db.session.commit()`, mirroring `add_to_playlist()`'s
+  existing pattern:
+
+  ```python
+  if song.shared_by != user_id:
+      create_notification(
+          user_id=song.shared_by,
+          notification_type="song_rated",
+          body=f"{rater.username} rated your song '{song.title}'.",
+      )
+  ```
+
+  The guard condition (`song.shared_by != user_id`) prevents a user from
+  getting notified when they rate their own song, mirroring the same
+  self-notification guard `add_to_playlist()` already uses for its own
+  action.
+- **Side-effect check:** Wrote `tests/test_notifications.py` (no prior test
+  file existed for this) with two cases:
+  `test_sharer_is_notified_when_song_is_rated` (a different user rates the
+  song → sharer gets exactly one `"song_rated"` notification with the
+  rater's username and song title in the body) and
+  `test_no_self_notification_when_rating_own_song` (the sharer rates their
+  own song → `get_notifications()` returns `[]`, confirming the guard
+  condition works). I specifically checked the self-rating case because
+  it's the one behavior most likely to regress silently if the guard
+  condition were ever removed or miscopied. Ran the full suite afterward
+  (`python -m pytest -v`, 17 tests): all pass, confirming this addition
+  didn't affect `add_to_playlist()`'s own notification behavior, streak
+  tracking, search, or playlist retrieval — none of which touch
+  `Notification` rows at all.
 
 ### Issue #5: The last song in a playlist never shows up
 
