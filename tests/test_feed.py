@@ -64,3 +64,33 @@ def test_listened_at_is_unambiguously_utc(app, friends):
             f"listened_at {listened_at_str!r} has no timezone marker — "
             "a client parsing this will not know it's UTC"
         )
+
+
+def test_activity_feed_listened_at_is_unambiguously_utc(app, friends):
+    """
+    get_activity_feed() shares the same serialization step as
+    get_friends_listening_now() and must carry the same explicit UTC marker
+    on 'listened_at' — a naive isoformat() string here is just as ambiguous
+    to a client as it was in the other function.
+    """
+    with app.app_context():
+        main_user, friend = friends
+        main_user = db.session.get(User, main_user.id)
+        friend = db.session.get(User, friend.id)
+
+        song = Song(title="Test Song", artist="Test Artist", shared_by=friend.id)
+        db.session.add(song)
+        db.session.commit()
+
+        event_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.session.add(ListeningEvent(user_id=friend.id, song_id=song.id, listened_at=event_time))
+        db.session.commit()
+
+        result = feed_service.get_activity_feed(main_user.id)
+
+        assert len(result) == 1
+        listened_at_str = result[0]["listened_at"]
+        assert listened_at_str.endswith("Z") or "+00:00" in listened_at_str or "+" in listened_at_str[10:], (
+            f"listened_at {listened_at_str!r} has no timezone marker — "
+            "a client parsing this will not know it's UTC"
+        )

@@ -6,6 +6,10 @@ Read through the flow of code, asking AI as coach to confirm thinking is correct
 
 While investigating Issue #4 (notification on rating), I initially thought the expected behavior was that the playlist's creator should be notified when someone rates a song in that playlist. I asked the AI to check that interpretation against the code. It pointed out that the `Rating` model (`id, user_id, song_id, score, rated_at`) has no `playlist_id` field at all, and that `rate_song()` never receives a `playlist_id` — so there's no way to even determine "which playlist" a rating belongs to, since a song can be in multiple playlists at once. That confirmed my interpretation was wrong: the correct parallel is "notify the song's original sharer," the same pattern `add_to_playlist()` already uses, not "notify the playlist creator." I had to revise my understanding based on that check rather than going in with the playlist-creator assumption.
 
+For Issue #2 (Friends Listening Now showing stale friends), I initially believed the bug was in the 24-hour threshold filter in `feed_service.py`. Rather than just accepting that theory, I had the AI help me build several tests to actively try to prove it — a single friend with two events, two separate friends, the full seeded dataset, and a live `curl` call against the real running server. Every one of them showed the filter working correctly. Only after that repeated negative evidence did we move to inspecting the serialization step instead, which is where the real bug was (a naive datetime losing its UTC marker before being sent to the client). I had to abandon my original theory based on it consistently failing to reproduce, rather than assuming my first plausible-sounding explanation was the right one.
+
+For Issue #3 (duplicate search results), the AI helped me discover that the bug's described symptom — a 3-tag song appearing 3 times — didn't actually reproduce in my environment, even though the join in `search_songs()` looked exactly like it should cause duplication. I asked it to help me check the raw SQL versus the ORM's returned results, which showed the raw SQL genuinely produced 3 rows while the ORM silently collapsed them to 1 — revealing that a SQLAlchemy library behavior was masking the underlying flaw, not that the flaw didn't exist. I also had it check my installed SQLAlchemy version against the `requirements.txt` pin to rule out a version-mismatch explanation before concluding the fix was still necessary. This was a case of verifying that a "the bug doesn't reproduce" result was genuinely true, rather than a test setup mistake, before deciding whether to act on it.
+
 ---
 
 ## Codebase Map
@@ -429,6 +433,28 @@ While investigating Issue #4 (notification on rating), I initially thought the e
   the zero-songs case. This fix also happened to resolve both
   `test_playlists.py` failures noted (but not investigated) during Issue
   #2's side-effect check.
+
+---
+
+## Additional fix found during side-effect review (not one of the 5 numbered issues)
+
+While doing the Issue #2 side-effect check, I only verified that nothing
+*downstream* of `get_friends_listening_now()` broke — I hadn't checked
+whether the same root cause existed elsewhere in `feed_service.py`. It
+does: `get_activity_feed()` (the `GET /feed/<user_id>/activity` endpoint)
+builds its response with the identical unguarded
+`event.listened_at.isoformat()` call, producing the same marker-less
+timestamp string (e.g. `'2026-07-04T01:25:45.963710'`) for the same
+reason — SQLite/SQLAlchemy round-trips a stored UTC datetime as naive.
+This wasn't part of the original bug report and no test exercised this
+function at all, so it went unnoticed during the Issue #2 fix.
+
+I added `tests/test_feed.py::test_activity_feed_listened_at_is_unambiguously_utc`
+(same shape as the Issue #2 test) and confirmed it failed against the
+original code before applying the identical fix — attaching
+`tzinfo=timezone.utc` before calling `.isoformat()` — to
+`get_activity_feed()`. Ran the full suite afterward
+(`python -m pytest -v`, 18 tests): all pass.
 
 ---
 

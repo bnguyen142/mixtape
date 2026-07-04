@@ -99,10 +99,13 @@ def get_activity_feed(user_id: str, limit: int = 20) -> list[dict]:
     for event in events:
         friend = db.session.get(User, event.user_id)
         song = db.session.get(Song, event.song_id)
+        listened_at = event.listened_at
+        if listened_at.tzinfo is None:
+            listened_at = listened_at.replace(tzinfo=timezone.utc)
         result.append({
             "friend": friend.to_dict(),
             "song": song.to_dict(),
-            "listened_at": event.listened_at.isoformat(),
+            "listened_at": listened_at.isoformat(),
         })
 
     return result
