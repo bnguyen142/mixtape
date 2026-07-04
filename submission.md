@@ -2,7 +2,7 @@
 
 ## AI Usage
 
-Read through the flow of code, asking AI as coach to confirm thinking is correct on certain things and asking questions like search and q functions. also ask to clarify when terms like "feed" was used to in feed_bp vs feed inside a function. after going thruogh and mapping the services to route, I ask AI to confirm my connections
+Read through the flow of code, asking AI as coach to confirm thinking is correct on certain things and asking questions like search and q functions. also ask to clarify when terms like "feed" was used to in feed_bp vs feed inside a function. after going through and mapping the services to route, I ask AI to confirm my connections
 
 While investigating Issue #4 (notification on rating), I initially thought the expected behavior was that the playlist's creator should be notified when someone rates a song in that playlist. I asked the AI to check that interpretation against the code. It pointed out that the `Rating` model (`id, user_id, song_id, score, rated_at`) has no `playlist_id` field at all, and that `rate_song()` never receives a `playlist_id` — so there's no way to even determine "which playlist" a rating belongs to, since a song can be in multiple playlists at once. That confirmed my interpretation was wrong: the correct parallel is "notify the song's original sharer," the same pattern `add_to_playlist()` already uses, not "notify the playlist creator." I had to revise my understanding based on that check rather than going in with the playlist-creator assumption.
 
@@ -552,7 +552,7 @@ All three new tests follow the same fixture pattern already established in
 data-seeding fixture scoped to that one test file) so they run fully
 isolated from each other and from the real `mixtape.db`, and so anyone
 extending this suite later has a consistent pattern to follow. Running
-`python -m pytest -v` from the project root now executes all 17 tests
+`python -m pytest -v` from the project root now executes all 21 tests
 across all five test files in one pass — that full run is what should be
 checked before merging any future change to `streak_service.py`,
 `feed_service.py`, `search_service.py`, `playlist_service.py`, or
@@ -562,5 +562,5 @@ checked before merging any future change to `streak_service.py`,
 
 ## git log --oneline screenshot
 
-![git log --oneline output showing all 5 fix commits on bugfix/mixtape](docs/git-log-screenshot.png)
+![git log --oneline output showing all fix commits on bugfix/mixtape](docs/git-log-screenshot.png)
 
